@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>幸运转盘 · 1-6</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at 50% 0%, #1b2a4a 0%, #080b14 62%);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    color: #e8eefc;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    overflow: hidden;
+  }
+  .app {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+    padding: 20px;
+  }
+  h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 8px;
+    text-indent: 8px;
+    background: linear-gradient(180deg, #ffffff, #7fc0ff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    filter: drop-shadow(0 0 14px rgba(80, 170, 255, .5));
+  }
+  .stage {
+    position: relative;
+    width: min(86vw, 440px, 58vh);
+    aspect-ratio: 1 / 1;
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+
+  #spinBtn {
+    padding: 14px 52px;
+    border: 1px solid rgba(120, 200, 255, .55);
+    border-radius: 999px;
+    background: linear-gradient(180deg, #2f86dd, #17539e);
+    color: #fff;
+    font-family: inherit;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    text-indent: 3px;
+    cursor: pointer;
+    box-shadow: 0 10px 28px rgba(50, 140, 255, .38), inset 0 1px 0 rgba(255, 255, 255, .28);
+    transition: transform .12s ease, box-shadow .12s ease, opacity .2s;
+  }
+  #spinBtn:active:not(:disabled) {
+    transform: scale(.95);
+    box-shadow: 0 5px 16px rgba(50, 140, 255, .3);
+  }
+  #spinBtn:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  #result {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 46px;
+    padding: 8px 28px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .05);
+    border: 1px solid rgba(255, 255, 255, .1);
+    font-size: 15px;
+    color: #8fa5c4;
+    transition: all .3s ease;
+  }
+  #result.show {
+    color: #fff;
+    background: rgba(90, 170, 255, .16);
+    border-color: rgba(120, 200, 255, .55);
+    box-shadow: 0 0 34px rgba(80, 160, 255, .4);
+    transform: scale(1.06);
+  }
+  #result b {
+    font-size: 26px;
+    color: #ffd166;
+    margin: 0 8px;
+    text-shadow: 0 0 18px rgba(255, 200, 80, .8);
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <h1>幸运转盘</h1>
+  <div class="stage">
+    <canvas id="wheel"></canvas>
+  </div>
+  <button id="spinBtn">开始抽奖</button>
+  <div id="result">点击按钮开始</div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============ 基础参数 ============ */
+  const W = 600, H = 600;
+  const CX = W / 2, CY = H / 2;
+  const R = 250;              // 转盘半径
+  const N = 6;                // 扇区数量
+  const SEG = 360 / N;        // 每格 60 度
+  const BASE = -120;          // 扇区 0 的起始角（度），让 1 号正好在正上方
+
+  const COLORS = ['#FF6B6B', '#FFA94D', '#FFD43B', '#69DB7C', '#4DABF7', '#B197FC'];
+
+  /* ============ DOM ============ */
+  const canvas   = document.getElementById('wheel');
+  const ctx      = canvas.getContext('2d');
+  const spinBtn  = document.getElementById('spinBtn');
+  const resultEl = document.getElementById('result');
+
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width  = W * DPR;
+  canvas.height = H * DPR;
+
+  /* ============ 状态 ============ */
+  let rot = 0;                 // 当前旋转角度（度，顺时针为正）
+  let spinning = false;
+  let startRot = 0, targetRot = 0, startTime = 0, duration = 0;
+  let lastIdx = -1;
+  let highlightIdx = -1, highlightUntil = 0;
+  let lastTickTime = 0;
+
+  /* ============ 音频（Web Audio 合成，无需音频文件） ============ */
+  let audioCtx = null;
+
+  function initAudio() {
+    if (!audioCtx) {
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (e) {
+        audioCtx = null;
+      }
+    }
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  // 转动时的“哒哒”声
+  function playTick() {
+    if (!audioCtx) return;
+    const now = performance.now();
+    if (now - lastTickTime < 45) return;
+    lastTickTime = now;
+
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(1150, t);
+    g.gain.setValueAtTime(0.05, t);
+    g.gain.exponentialRampToValueAtTime(0.0008, t + 0.045);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.05);
+  }
+
+  // 停止时的提示音
+  function playDing() {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    [880, 1320].forEach((freq, i) => {
+      const osc = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const s = t + i * 0.09;
+      g.gain.setValueAtTime(0, s);
+      g.gain.linearRampToValueAtTime(0.11, s + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0008, s + 0.5);
+      osc.connect(g).connect(audioCtx.destination);
+      osc.start(s);
+      osc.stop(s + 0.55);
+    });
+  }
+
+  /* ============ 核心：角度 ↔ 结果 的换算 ============ */
+
+  // 指针固定在正上方（-90°）。返回指针当前指向的扇区索引 0~5
+  function indexAtPointer() {
+    const deg = (((-rot + 30) % 360) + 360) % 360;
+    return Math.floor(deg / SEG) % N;
+  }
+
+  /* ============ 抽奖 ============ */
+  function spin() {
+    if (spinning) return;
+    initAudio();
+
+    spinning = true;
+    spinBtn.disabled = true;
+    spinBtn.textContent = '转动中…';
+    resultEl.classList.remove('show');
+    resultEl.textContent = '转动中…';
+    highlightIdx = -1;
+
+    // 先随机决定结果，再反推角度，保证视觉与结果完全一致
+    const idx = Math.floor(Math.random() * N);
+
+    // 让扇区 idx 的中心停在指针处：rot ≡ -idx*60 (mod 360)
+    const targetMod  = (((-idx * SEG) % 360) + 360) % 360;
+    const currentMod = (((rot % 360) + 360) % 360);
+
+    let delta = targetMod - currentMod;
+    if (delta < 0) delta += 360;
+
+    const turns = 5 + Math.floor(Math.random() * 3);   // 多转 5~7 圈
+    startRot  = rot;
+    targetRot = rot + turns * 360 + delta;
+    startTime = performance.now();
+    duration  = 4200 + Math.random() * 900;            // 4.2~5.1 秒
+
+    lastIdx = indexAtPointer();
+  }
+
+  function finish() {
+    spinning = false;
+    const idx = indexAtPointer();          // 以最终角度为准，绝对可靠
+
+    highlightIdx = idx;
+    highlightUntil = performance.now() + 1800;
+
+    spinBtn.disabled = false;
+    spinBtn.textContent = '再抽一次';
+
+    resultEl.innerHTML = '你抽到了 <b>' + (idx + 1) + '</b> 号';
+    resultEl.classList.add('show');
+    playDing();
+  }
+
+  /* ============ 绘制 ============ */
+  function draw() {
+    const now = performance.now();
+    const rotRad = rot * Math.PI / 180;
+    const hl = now < highlightUntil ? highlightIdx : -1;
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    /* ---- 转盘主体 ---- */
+    ctx.save();
+    ctx.translate(CX, CY);
+
+    // 外圈底盘
+    ctx.beginPath();
+    ctx.arc(0, 0, R + 16, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, .06)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, .18)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // 六个扇区
+    for (let i = 0; i < N; i++) {
+      const a0 = (BASE + i * SEG) * Math.PI / 180 + rotRad;
+      const a1 = a0 + SEG * Math.PI / 180;
+
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, R, a0, a1);
+      ctx.closePath();
+      ctx.fillStyle = COLORS[i];
+      ctx.fill();
+
+      // 中奖高亮
+      if (i === hl) {
+        ctx.save();
+        ctx.globalAlpha = 0.35 + Math.sin(now / 110) * 0.28;
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // 分隔线
+      ctx.strokeStyle = 'rgba(255, 255, 255, .55)';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
+
+    // 数字（保持正立，方便阅读）
+    for (let i = 0; i < N; i++) {
+      const mid = (BASE + i * SEG + SEG / 2) * Math.PI / 180 + rotRad;
+      const tx = Math.cos(mid) * R * 0.66;
+      const ty = Math.sin(mid) * R * 0.66;
+
+      ctx.save();
+      ctx.translate(tx, ty);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = 'bold 76px "PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(0, 0, 0, .16)';
+      ctx.fillText(i + 1, 0, 4);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(i + 1, 0, 0);
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    /* ---- 中心圆盘 ---- */
+    ctx.save();
+    ctx.translate(CX, CY);
+    ctx.beginPath();
+    ctx.arc(0, 0, 56, 0, Math.PI * 2);
+    const cg = ctx.createRadialGradient(0, -20, 4, 0, 0, 56);
+    cg.addColorStop(0, '#ffffff');
+    cg.addColorStop(1, '#c2cfe2');
+    ctx.fillStyle = cg;
+    ctx.shadowColor = 'rgba(0, 0, 0, .5)';
+    ctx.shadowBlur = 18;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(255, 255, 255, .9)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = '#48586f';
+    ctx.font = 'bold 24px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('GO', 0, 1);
+    ctx.restore();
+
+    /* ---- 顶部指针 ---- */
+    ctx.save();
+    ctx.translate(CX, CY - R);
+    ctx.beginPath();
+    ctx.moveTo(0, 16);
+    ctx.lineTo(-19, -30);
+    ctx.lineTo(0, -48);
+    ctx.lineTo(19, -30);
+    ctx.closePath();
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = 'rgba(0, 0, 0, .45)';
+    ctx.shadowBlur = 14;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(130, 150, 180, .9)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /* ============ 主循环 ============ */
+  function loop(now) {
+    if (spinning) {
+      const t = Math.min(1, (now - startTime) / duration);
+      const e = 1 - Math.pow(1 - t, 4);              // easeOutQuart 缓动
+      rot = startRot + (targetRot - startRot) * e;
+
+      // 经过扇区边界时“哒”一声
+      const ci = indexAtPointer();
+      if (ci !== lastIdx) {
+        lastIdx = ci;
+        playTick();
+      }
+
+      if (t >= 1) {
+        rot = ((targetRot % 360) + 360) % 360;       // 归一化，避免数值无限增大
+        finish();
+      }
+    }
+
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  /* ============ 事件绑定 ============ */
+  spinBtn.addEventListener('click', spin);
+
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.code === 'Enter') {
+      if (document.activeElement === spinBtn) return;   // 避免与按钮默认行为重复触发
+      e.preventDefault();
+      spin();
+    }
+  });
+
+  /* ============ 启动 ============ */
+  requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
